@@ -83,8 +83,11 @@ class YoutubeDownloaderApp(ctk.CTk):
         self.ffmpeg_status_frame = ctk.CTkFrame(self.left_panel, fg_color="transparent")
         self.ffmpeg_status_frame.pack(side="bottom", fill="x", padx=20, pady=20)
         
+        self.ffmpeg_info_row = ctk.CTkFrame(self.ffmpeg_status_frame, fg_color="transparent")
+        self.ffmpeg_info_row.pack(fill="x", anchor="w")
+        
         self.ffmpeg_status_indicator = ctk.CTkLabel(
-            self.ffmpeg_status_frame, 
+            self.ffmpeg_info_row, 
             text="●", 
             text_color="#ff5555", 
             font=ctk.CTkFont(size=14)
@@ -92,11 +95,21 @@ class YoutubeDownloaderApp(ctk.CTk):
         self.ffmpeg_status_indicator.pack(side="left", padx=(0, 5))
         
         self.ffmpeg_status_text = ctk.CTkLabel(
-            self.ffmpeg_status_frame, 
+            self.ffmpeg_info_row, 
             text="ffmpeg 미연동 (고화질 다운로드 불가)", 
             font=ctk.CTkFont(size=11)
         )
         self.ffmpeg_status_text.pack(side="left")
+
+        self.ffmpeg_install_btn = ctk.CTkButton(
+            self.ffmpeg_status_frame,
+            text="FFmpeg 자동 설치",
+            height=26,
+            font=ctk.CTkFont(size=11),
+            fg_color="#3a3a46",
+            hover_color="#4f4f5f",
+            command=self.start_ffmpeg_install_thread
+        )
 
         # ==========================================
         # 우측 패널 (제어 카드)
@@ -243,9 +256,13 @@ class YoutubeDownloaderApp(ctk.CTk):
         if self.downloader.is_ffmpeg_available():
             self.ffmpeg_status_indicator.configure(text_color="#39ff14")
             self.ffmpeg_status_text.configure(text="ffmpeg 연동됨 (고화질 병합 가능)")
+            if hasattr(self, 'ffmpeg_install_btn'):
+                self.ffmpeg_install_btn.pack_forget()
         else:
             self.ffmpeg_status_indicator.configure(text_color="#ff3333")
             self.ffmpeg_status_text.configure(text="ffmpeg 미연동 (최대 720p 제한 또는 실패 가능)")
+            if hasattr(self, 'ffmpeg_install_btn'):
+                self.ffmpeg_install_btn.pack(fill="x", pady=(5, 0))
 
     def browse_folder(self):
         """저장할 폴더를 브라우징하여 선택합니다."""
@@ -468,3 +485,105 @@ class YoutubeDownloaderApp(ctk.CTk):
             # 오류 메시지 세부 분석
             err_msg = res.get('error', '알 수 없는 오류')
             messagebox.showerror("다운로드 실패", f"다운로드 도중 에러가 발생했습니다.\n\n오류 설명:\n{err_msg}")
+
+    # ==========================================
+    # 백그라운드 스레드: FFmpeg 자동 설치
+    # ==========================================
+    def start_ffmpeg_install_thread(self):
+        self.ffmpeg_install_btn.configure(state="disabled", text="설치 준비 중...")
+        self.ffmpeg_status_text.configure(text="ffmpeg 다운로드 준비 중...")
+        
+        t = threading.Thread(target=self._ffmpeg_install_logic, daemon=True)
+        t.start()
+
+    def _ffmpeg_install_logic(self):
+        import urllib.request
+        import zipfile
+        import shutil
+        import ssl
+
+        url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+        zip_path = os.path.join(os.getcwd(), "ffmpeg_temp.zip")
+        extract_path = os.path.join(os.getcwd(), "ffmpeg_temp_extracted")
+        bin_dir = os.path.join(os.getcwd(), "bin")
+
+        try:
+            # 1. Download
+            self.after(0, lambda: self.ffmpeg_status_text.configure(text="ffmpeg 다운로드 중 (약 35MB)..."))
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            context = ssl._create_unverified_context()
+            
+            with urllib.request.urlopen(req, context=context) as response, open(zip_path, 'wb') as out_file:
+                total_size = int(response.getheader('Content-Length') or 0)
+                if total_size > 0:
+                    downloaded = 0
+                    block_size = 1024 * 512 # 512KB chunks
+                    while True:
+                        block = response.read(block_size)
+                        if not block:
+                            break
+                        out_file.write(block)
+                        downloaded += len(block)
+                        percent = (downloaded / total_size) * 100
+                        # Update status text in main thread
+                        self.after(0, lambda p=percent: self.ffmpeg_status_text.configure(
+                            text=f"ffmpeg 다운로드 중... ({p:.1f}%)"
+                        ))
+                else:
+                    shutil.copyfileobj(response, out_file)
+
+            # 2. Extract
+            self.after(0, lambda: self.ffmpeg_status_text.configure(text="압축 해제 중..."))
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_path)
+
+            # 3. Copy binaries
+            self.after(0, lambda: self.ffmpeg_status_text.configure(text="실행 파일 복사 중..."))
+            os.makedirs(bin_dir, exist_ok=True)
+            copied = []
+            for root, dirs, files in os.walk(extract_path):
+                for file in files:
+                    if file in ("ffmpeg.exe", "ffprobe.exe"):
+                        src = os.path.join(root, file)
+                        dst = os.path.join(bin_dir, file)
+                        shutil.copy2(src, dst)
+                        copied.append(file)
+
+            # 4. Clean up
+            self.after(0, lambda: self.ffmpeg_status_text.configure(text="임시 파일 정리 중..."))
+            if os.path.exists(zip_path):
+                try: os.remove(zip_path)
+                except: pass
+            if os.path.exists(extract_path):
+                try: shutil.rmtree(extract_path)
+                except: pass
+
+            # 5. Complete
+            if len(copied) >= 2:
+                success = self.downloader.re_resolve_ffmpeg()
+                if success:
+                    self.after(0, lambda: self._ffmpeg_install_finished(True, "설치 완료!"))
+                else:
+                    self.after(0, lambda: self._ffmpeg_install_finished(False, "연동 확인 실패 (다시 시도해 주세요)"))
+            else:
+                self.after(0, lambda: self._ffmpeg_install_finished(False, "필수 파일 복사 누락"))
+
+        except Exception as e:
+            # Clean up on error
+            if os.path.exists(zip_path):
+                try: os.remove(zip_path)
+                except: pass
+            if os.path.exists(extract_path):
+                try: shutil.rmtree(extract_path)
+                except: pass
+            
+            error_msg = str(e)
+            self.after(0, lambda: self._ffmpeg_install_finished(False, f"설치 오류: {error_msg}"))
+
+    def _ffmpeg_install_finished(self, success, message):
+        self.check_ffmpeg()
+        if success:
+            messagebox.showinfo("FFmpeg 자동 설치 완료", "FFmpeg가 정상적으로 설치 및 연동되었습니다!\n이제 고화질 영상 다운로드를 이용할 수 있습니다.")
+        else:
+            self.ffmpeg_install_btn.configure(state="normal", text="FFmpeg 자동 설치")
+            messagebox.showerror("FFmpeg 설치 실패", f"설치 중 문제가 발생했습니다.\n\n오류 내용:\n{message}")

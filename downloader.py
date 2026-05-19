@@ -33,6 +33,13 @@ class YoutubeDownloader:
 
         return None
 
+    def re_resolve_ffmpeg(self):
+        """
+        ffmpeg의 경로를 다시 탐색하고 연동 여부를 반환합니다.
+        """
+        self.ffmpeg_path = self._resolve_ffmpeg_path()
+        return self.is_ffmpeg_available()
+
     def is_ffmpeg_available(self):
         """
         ffmpeg이 시스템이나 로컬 디렉토리에서 사용 가능한지 확인합니다.
